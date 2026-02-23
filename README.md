@@ -1,10 +1,10 @@
 # Lobster
 
-A Moltbot-native workflow shell: typed (JSON-first) pipelines, jobs, and approval gates.
+An OpenClaw-native workflow shell: typed (JSON-first) pipelines, jobs, and approval gates.
 
 
 ## Example of lobster at work
-Moltbot or any other AI agent can use `lobster` as a workflow engine and not construct a query every time - thus saving tokens, providing room for determinism, and resumability.
+OpenClaw or any other AI agent can use `lobster` as a workflow engine and not construct a query every time - thus saving tokens, providing room for determinism, and resumability.
 
 ### Watching a PR that hasn't had changes
 ```
@@ -136,7 +136,7 @@ node bin/lobster.js "workflows.run --name github.pr.monitor --args-json '{\"repo
 - Typed pipelines (objects/arrays), not text pipes.
 - Local-first execution.
 - No new auth surface: Lobster must not own OAuth/tokens.
-- Composable macros that Moltbot can invoke in one step to save tokens.
+- Composable macros that OpenClaw can invoke in one step to save tokens.
 
 ## Quick start
 
@@ -153,17 +153,200 @@ From this folder:
 
 - `pnpm test` runs `tsc` and then executes tests against `dist/`.
 - `bin/lobster.js` prefers the compiled entrypoint in `dist/` when present.
+
+## CLI reference
+
+### Running a pipeline
+
+A pipeline is a sequence of commands separated by `|`. Each command receives the previous command's output items and emits new items:
+
+```
+lobster '<pipeline>'
+lobster run '<pipeline>'
+lobster run --mode tool '<pipeline>'
+```
+
+Example:
+
+```
+lobster 'exec --json --shell "echo [1,2,3]" | where "0>=0" | json'
+```
+
+### Modes
+
+Lobster has two output modes:
+
+- **human** (default): renderers like `table` and `json` write directly to stdout.
+- **tool** (`--mode tool`): output is always a single JSON envelope on stdout. Use this when calling from an AI agent like OpenClaw.
+
+```
+lobster run --mode tool 'exec --json --shell "echo [1,2,3]" | where "0>=0"'
+```
+
+Tool mode output:
+
+```json
+{
+  "protocolVersion": 1,
+  "ok": true,
+  "status": "ok",
+  "output": [1, 2, 3],
+  "requiresApproval": null
+}
+```
+
+### Approval flow (tool mode)
+
+When a pipeline halts at an `approve` gate, the envelope has `status: "needs_approval"` and includes a `resumeToken`:
+
+```json
+{
+  "protocolVersion": 1,
+  "ok": true,
+  "status": "needs_approval",
+  "output": [],
+  "requiresApproval": {
+    "type": "approval_request",
+    "prompt": "Send 3 emails?",
+    "items": [...],
+    "resumeToken": "<opaque string>"
+  }
+}
+```
+
+The agent presents the prompt and items to the user, then resumes or cancels:
+
+```
+# Approve — continue the pipeline after the gate
+lobster resume --token <resumeToken> --approve yes
+
+# Cancel — abort the pipeline
+lobster resume --token <resumeToken> --approve no
+```
+
+The `resume` command also returns a tool envelope with `status: "ok"` or `"cancelled"`.
+
+### Running a workflow file
+
+```
+lobster run path/to/workflow.lobster
+lobster run --file path/to/workflow.lobster --args-json '{"tag":"family"}'
+```
+
+In tool mode:
+
+```
+lobster run --mode tool --file path/to/workflow.lobster --args-json '{"repo":"owner/repo","pr":123}'
+```
+
+### Running a named workflow
+
+```
+lobster 'workflows.run --name github.pr.monitor --args-json "{\"repo\":\"owner/repo\",\"pr\":123}"'
+```
+
+### Doctor
+
+Verify that Lobster is installed and operational (useful for OpenClaw health checks):
+
+```
+lobster doctor
+```
+
+Output:
+
+```json
+{
+  "protocolVersion": 1,
+  "ok": true,
+  "status": "ok",
+  "output": [{ "toolMode": true, "protocolVersion": 1, "version": "2026.1.21-1" }],
+  "requiresApproval": null
+}
+```
+
+### Help
+
+```
+lobster help
+lobster help exec
+lobster help approve
+lobster help clawd.invoke
+```
+
 ## Commands
 
-- `exec`: run OS commands
-- `exec --stdin raw|json|jsonl`: feed pipeline input into subprocess stdin
-- `where`, `pick`, `head`: data shaping
-- `json`, `table`: renderers
-- `approve`: approval gate (TTY prompt or `--emit` for Moltbot integration)
+| Command | Description |
+|---|---|
+| `exec` | Run an OS command; `--json` parses stdout as JSON; `--stdin raw&#124;json&#124;jsonl` feeds pipeline input to subprocess stdin |
+| `where` | Filter items by expression (e.g. `where "state=='OPEN'"`) |
+| `pick` | Select fields from items (e.g. `pick title url`) |
+| `head` | Keep only the first N items |
+| `sort` | Sort items by a field |
+| `dedupe` | Remove duplicate items by key |
+| `map` | Transform items using a shell command or template |
+| `group_by` | Group items by field value |
+| `template` | Render items with a string template |
+| `json` | Pretty-print items as JSON to stdout (human mode renderer) |
+| `table` | Render items as a table to stdout (human mode renderer) |
+| `approve` | Approval gate — prompts on TTY or emits `approval_request` in tool/non-interactive mode |
+| `state.get` | Read a value from Lobster's key/value state store |
+| `state.set` | Write a value to Lobster's key/value state store |
+| `diff.last` | Compare current items with the last saved snapshot; emits a diff result |
+| `clawd.invoke` | Call an OpenClaw tool endpoint (see below) |
+| `llm_task.invoke` | Invoke an LLM task via a tool endpoint |
+| `gog.gmail.search` | Fetch Gmail messages via the `gog` CLI |
+| `gog.gmail.send` | Send Gmail messages via the `gog` CLI |
+| `email.triage` | Classify email messages into buckets |
+| `workflows.list` | List available named workflows |
+| `workflows.run` | Run a named workflow by name with optional JSON args |
+| `commands.list` | List all available commands |
 
-## Next steps
+## Using Lobster with OpenClaw
 
-- Moltbot integration: ship as an optional Moltbot plugin tool.
+OpenClaw calls Lobster as a subprocess tool. The integration points are:
+
+1. **Health check**: call `lobster doctor` and verify `ok: true` in the envelope.
+2. **Run a pipeline or workflow**: call `lobster run --mode tool '<pipeline>'`.
+3. **Handle approval gates**: when `status` is `"needs_approval"`, show `requiresApproval.prompt` and `requiresApproval.items` to the user, then call `lobster resume`.
+4. **Call back into OpenClaw from a pipeline**: use `clawd.invoke` inside a pipeline.
+
+### Calling OpenClaw tools from within a Lobster pipeline
+
+`clawd.invoke` bridges from a Lobster pipeline back to an OpenClaw tool endpoint. Configure the target with environment variables or flags:
+
+- `CLAWD_URL` — OpenClaw base URL (e.g. `http://localhost:3456`)
+- `CLAWD_TOKEN` — optional Bearer auth token
+
+```
+# Send a message via an OpenClaw tool
+exec --json 'gh pr list --json number,title,url' \
+  | where "reviewDecision=='APPROVED'" \
+  | clawd.invoke --tool message --action send \
+      --args-json '{"provider":"telegram","to":"me","message":"PR approved!"}'
+```
+
+Using `--each` to call the tool once per input item (merges the item into `--args-json`):
+
+```
+exec --json 'gh pr list --json number,title,url' \
+  | clawd.invoke --tool trello --action card.create --each \
+      --args-json '{"list":"Review"}'
+```
+
+**`clawd.invoke` options**
+
+| Flag | Description |
+|---|---|
+| `--url` | Override `CLAWD_URL` |
+| `--token` | Override `CLAWD_TOKEN` |
+| `--tool` | Tool name (required) |
+| `--action` | Tool action (required) |
+| `--args-json` | JSON object of tool arguments |
+| `--each` | Call the tool once per input item, merging the item under `--item-key` (default: `item`) |
+| `--item-key` | Key name used when merging the item into `--args-json` with `--each` |
+| `--session-key` | Optional session attribution |
+| `--dry-run` | Log but do not execute the tool call |
 
 ## Workflow files
 
